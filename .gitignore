@@ -1,0 +1,11 @@
+# Only the program files are kept in git. The folder also holds measurement data (up to 300 MB per
+# file), results and third-party material - everything not listed below is ignored.
+/*
+!/.gitignore
+!/.gitattributes
+!/*.py
+!/*.bat
+!/requirements.txt
+!/README.md
+!/CHANGELOG.md
+!/LICENSE

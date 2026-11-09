@@ -1,0 +1,3 @@
+* text=auto
+# cmd.exe needs CRLF line ends in batch files
+*.bat text eol=crlf
