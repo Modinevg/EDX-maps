@@ -669,6 +669,10 @@ SHIFT_MAX = 0.040       # keV
 # the M family of Y..Ba is much weaker than its L family (Nb: M/L ~ 0.1); its counts are limited to
 # this fraction of the L counts, so that it cannot take over a light-element line (Rh M vs C K)
 M_TO_L_MAX = 0.5
+# L and M families with the main line above this energy (Nb L, Pt M, I L...: heavy elements) stay out of the
+# detector refinement during the identification (fit_spectrum refine_skip_lm)
+HEAVY_LM_E = 1.5        # keV
+HEAVY_LM_SHARE = 0.1    # ... when they carry at least this share of the counts in the lines
 # in maps, families with the main line below this energy may be tied to the main family of the element
 TIE_LOW_E = 1.0         # keV
 # NLLS line-shape fit: Gaussian priors (shift in keV, width and group ratios as natural logs) and bounds
@@ -1172,14 +1176,19 @@ def _refine_nlls(E, Y, var, families, det, B, disp, free=('shift', 'width', 'rat
 
 def fit_spectrum(energy, y, families, det, bg_shape, n_bg=3, erange=(0.2, 20.0),
                  refine_calib=False, refine_res=False, refine_tail=False, nonneg=True, noise=None, nlls=(),
-                 dispersion=1.0, pileup=None, nlls_min_sigma=10.0, nlls_bounds=None):
+                 dispersion=1.0, pileup=None, nlls_min_sigma=10.0, nlls_bounds=None, refine_skip_lm=False):
     """Weighted least-squares fit of a spectrum with fixed-shape line families + background
     (bg_shape x Legendre polynomial). Optionally refines energy calibration (incl. the positions
     of the families below LOW_E_LINES keV), resolution (FWHM_Mn, Fano, gain spread) and the
     low-energy tail with a robust non-linear fit. nlls: line-shape parameters of the significant
     families refined by NLLS afterwards, any of ('shift', 'width', 'ratio'). dispersion: variance /
     counts (1 = Poisson; EDAX dead-time corrected counts ~1.4), scales the errors. pileup: shape of
-    the sum peaks (pileup_shape) - a non-negative model term besides the background."""
+    the sum peaks (pileup_shape) - a non-negative model term besides the background.
+    refine_skip_lm: if the model has L or M families of heavy elements (main line >= HEAVY_LM_E), scale,
+    resolution and tail are refined only on the channels of the K lines above LOW_E_LINES, away from the
+    heavy lines; without such a K family the detector stays as given. Heavy
+    L / M families overlap their neighbours (Pt M / Au M, 72 eV apart) and have uncertain ratios: with only
+    Au in the model a refinement widened the peaks to 158 eV to cover Pt + Au, and moved the scale."""
     y = np.asarray(y, dtype=float)
     disp = energy[1] - energy[0]
     sel = (energy >= erange[0]) & (energy <= erange[1])
@@ -1195,10 +1204,37 @@ def fit_spectrum(energy, y, families, det, bg_shape, n_bg=3, erange=(0.2, 20.0),
     # In a high-statistics spectrum (SEM) the lines
     # below, which get their own position corrections (_refine_low), stay out of this step: their incomplete
     # charge collection with millions of counts would pull the scale (C, O shifted Na, P by ~10 eV)
-    anchors = sorted(f.main[1] for f in families if f.main[1] >= LOW_E_LINES)
+    heavy = [f for f in families if f.family in ('L', 'M') and f.main[1] >= HEAVY_LM_E] if refine_skip_lm else []
+    if heavy:       # only if they carry a good part of the line counts (not a trace, or a candidate on trial)
+        c0 = _solve(np.hstack([peak_matrix(E, families, det, disp), B]), Y, var0, nf + npu, True)[0][:nf]
+        hc = sum(c0[j] for j, f in enumerate(families) if f in heavy)
+        if hc < HEAVY_LM_SHARE * max(float(np.sum(np.maximum(c0, 0))), 1.0):
+            heavy = []
+    # with heavy families: only the K families above LOW_E_LINES (one element, known ratios; the L families
+    # of Fe..Zn at 0.7-1 keV have uncertain ratios too - Zn L moved the scale of a Pt + Zn + Mo spectrum)
+    light = [f for f in families if f.family == 'K' and f.main[1] >= LOW_E_LINES] if heavy else families
+    anchors = sorted(f.main[1] for f in light if f.main[1] >= LOW_E_LINES)
     two_anchors = len(anchors) >= 2 and anchors[-1] - anchors[0] >= 1.0
     upper = (E >= LOW_E_LINES if anchors and high_statistics(Y) and np.sum(E >= LOW_E_LINES) > 10
              else np.ones(len(E), bool))
+    res_free = ['fwhm_mn', 'fano', 'spread']
+    if heavy:
+        # only the channels of the other families' lines, away from the strong heavy lines (also no peaks of
+        # elements not yet in the model, which would pull the scale - Mo K at 17.4 keV in a Pt + Pd + Zn spectrum)
+        near = np.zeros(len(E), bool)
+        for f in light:
+            for _, le, w in f.lines:
+                if w >= 0.05:
+                    near |= np.abs(E - le) < 1.5 * float(det.fwhm(le))
+        for f in heavy:
+            for _, le, w in f.lines:
+                if w >= 0.1:
+                    near &= np.abs(E - le) >= float(det.fwhm(le))
+        upper &= near
+        if not anchors:         # nothing left to refine on
+            upper[:] = False
+        elif not two_anchors:   # one energy: the width there, not its energy dependence
+            res_free = ['fwhm_mn']
     lims = dict(offset=(-0.1, 0.1), gain=(-0.03, 0.03), fwhm_mn=(0.06, 0.30), fano=(0.10, 0.13),
                 spread=(0.0, 0.01), tail=(0.0, 0.25), tail_width=(0.3, 6.0))
     scale = dict(offset=0.005, gain=0.002, fwhm_mn=0.005, fano=0.01, spread=0.001, tail=0.01, tail_width=0.2)
@@ -1227,8 +1263,8 @@ def fit_spectrum(energy, y, families, det, bg_shape, n_bg=3, erange=(0.2, 20.0),
     # scale, resolution and tail from the lines above LOW_E_LINES (one tail for all lines cannot follow both
     # the soft C, N, O K peaks and e.g. Ti K; the low-energy lines get their own positions in _refine_low)
     free = ((['offset', 'gain'] if two_anchors else ['offset']) if refine_calib else []) \
-        + (['fwhm_mn', 'fano', 'spread'] if refine_res else []) + (['tail', 'tail_width'] if refine_tail else [])
-    if free and nf:
+        + (res_free if refine_res else []) + (['tail', 'tail_width'] if refine_tail else [])
+    if free and nf and upper.sum() > 10:
         det = refine(det, free, upper)
     if refine_calib and nf:
         cut = det.thr > 0 and erange[0] < det.thr + 5 * det.thr_width     # the range reaches the cut-off
@@ -1305,6 +1341,8 @@ def _families_consistent(fams, c, err, matched, e0_kev, threshold, ratio=0.3):
 
 
 PILEUP_MAX = 0.1    # a sum peak holds at most this fraction of the counts of its weaker parent family
+ID_FAMILY_RATIO = 0.3   # other well detected families of a candidate carry >= this share of its matched family
+ID_REFINE_SKIP_LM = True    # detector refinements during the identification without heavy L / M families (fit_spectrum)
 ID_MIN_OVERVOLTAGE = 1.5    # E0 / E_edge of a line by which an element may be identified
 ID_SHIFT_MIN_SIGMA = 100.0  # families this significant get their own position in the identification fits
 ID_SHIFT_MAX = 0.020       # keV, bound of that position correction (not enough to take over a neighbour)
@@ -1439,24 +1477,37 @@ def auto_identify(energy, y, det, bg, erange=(0.2, 20.0), e0_kev=300.0, threshol
             cache[el] = (fams, peak_matrix(E, fams, det, disp) if fams else np.zeros((len(E), 0)))
         return cache[el]
 
-    def fit(els, var):
+    def fit(els, var, force=None):
+        """Linear fit of the families of els. force=(el, family): the other well detected families of el
+        (those _families_consistent checks) are held at >= ID_FAMILY_RATIO x the counts of that family."""
         fams, mats = [], []
         for el in els:
             f, a = cols(el)
             fams += f
             mats.append(a)
         A = np.hstack(mats) if mats else np.zeros((len(E), 0))
+        Af, linked = A, []
+        if force:
+            jm = next(j for j, f in enumerate(fams) if (f.element, f.family) == force)
+            linked = [j for j, f in enumerate(fams) if f.element == force[0] and j != jm
+                      and 1.5 <= f.main[1] <= 20.0 and e0_kev >= 2.5 * f.edge]
+            Af = A.copy()
+            for j in linked:            # c_j = ratio x c_m + (free excess >= 0)
+                Af[:, jm] += ID_FAMILY_RATIO * A[:, j]
         B0, npu = _with_pileup(Bbg, pile['shape'], sel)
-        M = np.hstack([A, B0 * det.threshold(E)[:, None]])    # det is refined on the way
+        M = np.hstack([Af, B0 * det.threshold(E)[:, None]])    # det is refined on the way
         nf = A.shape[1]
         ub = np.r_[np.full(nf, np.inf), pile['ub'], np.full(Bbg.shape[1], np.inf)] if npu else None
         c, chi2, Mw, active = _solve_tied(M, Y, var, nf + npu, _tie_families(fams), ub=ub)  # sum peaks >= 0
         cov = np.linalg.pinv(Mw.T @ Mw)
         err = np.sqrt(np.maximum(np.diag(cov)[:nf], 1e-12))
-        for jm, jl in active:
-            err[jm] = M_TO_L_MAX * err[jl]
+        for jm_, jl in active:
+            err[jm_] = M_TO_L_MAX * err[jl]
         model = M @ c
-        return dict(fams=fams, A=A, c=c[:nf], chi2=chi2, peaks=A @ c[:nf], model=model, err=err,
+        c = c[:nf].copy()
+        for j in linked:
+            c[j] += ID_FAMILY_RATIO * c[jm]
+        return dict(fams=fams, A=A, c=c, chi2=chi2, peaks=A @ c, model=model, err=err,
                     r2=(Y - model) ** 2 / var)
 
     def variance(els):      # counts x dispersion (1 = Poisson) + systematic part of the line model
@@ -1485,7 +1536,7 @@ def auto_identify(energy, y, det, bg, erange=(0.2, 20.0), e0_kev=300.0, threshol
             if fams:
                 det = fit_spectrum(energy, y, fams, det, bg, n_bg=2, erange=erange, noise=noise,
                                    refine_calib=True, refine_res=True, refine_tail=True, dispersion=dispersion,
-                                   pileup=pile['shape'], nlls=nlls, nlls_min_sigma=ID_SHIFT_MIN_SIGMA,
+                                   pileup=pile['shape'], nlls=nlls, nlls_min_sigma=ID_SHIFT_MIN_SIGMA, refine_skip_lm=ID_REFINE_SKIP_LM,
                                    nlls_bounds=ID_SHAPE_BOUNDS).det
                 cache.clear()
             n_refined = len(chosen)
@@ -1515,29 +1566,34 @@ def auto_identify(energy, y, det, bg, erange=(0.2, 20.0), e0_kev=300.0, threshol
         near = np.abs(E - ep) < 2.5 * float(det.fwhm(max(ep, 0.1)))
         # low-energy lines appear up to a few tens of eV below their tabulated energy
         tol = 0.5 * float(det.fwhm(ep)) + 0.015 + (0.03 if ep < LOW_E_LINES else 0.0)
-        if is_sum_peak(ep, resid, sums):
-            piled.append(ep)
-            if log:
-                log(f'пик {ep:.3f} кэВ: вероятно, пик суммирования (pile-up)')
-            continue
+        # at the energy of a possible sum peak an element is taken only if its other lines explain residuals
+        # elsewhere too (Au L at 9.71 keV = C K + Pt L-alpha, 11.44 keV ~ Pt M + Pt L; Na K alone at the
+        # O + O sum energy stays a sum peak)
+        sum_like = is_sum_peak(ep, resid, sums)
         cands = {}
         for de, el, fam, sym, le, w in lines_near(ep, tol, min_weight=0.15, e0_kev=e0_kev):
             if el in chosen or el in excl or Family(el, fam) not in cols(el)[0]:     # (also: not excited)
                 continue
             cands.setdefault(el, (fam, sym, le))
         best = None
+        base = len(cur['fams'])
         for el, (fam, sym, le) in cands.items():
             r = fit(chosen + [el], var)
+            if not _families_consistent(r['fams'][base:], r['c'][base:], r['err'][base:], fam, e0_kev, threshold):
+                # another family of el is weaker than expected - absent, or its counts taken by an element
+                # found before whose lines overlap (Pt M under Au M, the L lines of both resolved): refit
+                # with the expected ratio held; the data must not contradict it (chi2 increase < threshold^2)
+                rf = fit(chosen + [el], var, force=(el, fam))
+                if rf['chi2'] - r['chi2'] > threshold ** 2 or not _families_consistent(
+                        rf['fams'][base:], rf['c'][base:], rf['err'][base:], fam, e0_kev, threshold):
+                    continue
+                r = rf
             gain = cur['chi2'] - r['chi2']
             # the candidate is ranked by how well it explains this peak (local chi2 gain);
             # the global gain is only used as the acceptance threshold
             local = cur['r2'][near].sum() - r['r2'][near].sum()
-            base = len(cur['fams'])
-            new = r['fams'][base:]
             contrib = (r['A'][:, base:] @ r['c'][base:])[win].sum()
             if contrib < 0.4 * net_peak:
-                continue
-            if not _families_consistent(new, r['c'][base:], r['err'][base:], fam, e0_kev, threshold):
                 continue
             if high and on_shoulder(ep, float(np.sum(r['c'][base:])), r):
                 continue
@@ -1549,13 +1605,19 @@ def auto_identify(energy, y, det, bg, erange=(0.2, 20.0), e0_kev=300.0, threshol
                 if gain * prior < (strictness(el) * threshold) ** 2:
                     continue
             if best is None or local * prior > best[0]:
-                best = (local * prior, el, fam, sym, le, gain * prior)
+                outside = cur['r2'][~near].sum() - r['r2'][~near].sum()
+                best = (local * prior, el, fam, sym, le, gain * prior, outside * prior)
+        if sum_like and (best is None or best[5] < threshold ** 2 or best[6] < threshold ** 2):
+            piled.append(ep)
+            if log:
+                log(f'пик {ep:.3f} кэВ: вероятно, пик суммирования (pile-up)')
+            continue
         if best is None or best[5] < threshold ** 2:
             rejected.append(ep)
             if log:
                 log(f'пик {ep:.3f} кэВ: нет подходящего элемента')
             continue
-        score, el, fam, sym, le, gain = best
+        score, el, fam, sym, le, gain, _ = best
         chosen.append(el)
         main = Family(el, fam).main
         details.append(dict(element=el, family=fam, energy=ep, line=f'{el} {line_label(main[0])}',
@@ -1568,7 +1630,7 @@ def auto_identify(energy, y, det, bg, erange=(0.2, 20.0), e0_kev=300.0, threshol
         fams = [f for el in chosen for f in cols(el)[0]]
         det = fit_spectrum(energy, y, fams, det, bg, n_bg=2, erange=erange, noise=noise,
                            refine_calib=True, refine_res=True, refine_tail=True, dispersion=dispersion,
-                           pileup=pile['shape'], nlls=nlls, nlls_min_sigma=ID_SHIFT_MIN_SIGMA,
+                           pileup=pile['shape'], nlls=nlls, nlls_min_sigma=ID_SHIFT_MIN_SIGMA, refine_skip_lm=ID_REFINE_SKIP_LM,
                                    nlls_bounds=ID_SHAPE_BOUNDS).det
         cache.clear()
     # high statistics: a light element whose peak a found family took over during the search (N K at
