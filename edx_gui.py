@@ -149,7 +149,10 @@ xraylib с поправками по спектру Pt + Au): без них ос
 пикселей, а карты — проекции спектров исходных пикселей на спектры компонент, в полном разрешении. Граница шума
 падает с числом пикселей, а собственное значение протяжённой фазы — нет: слабые протяжённые компоненты выходят
 над шумом (на тестовых картах — до двух сигнальных компонент больше). Детали меньше блока выделяются хуже;
-собственные значения, доли и r относятся к данным с биннингом.
+собственные значения, доли и r относятся к данным с биннингом. По умолчанию «авто»: без биннинга, но если так
+находится только одна сигнальная компонента, пробуются 2×2 и 4×4 (при ~20 отсчётах на пиксель разреженный
+шум прячет вторую фазу; модель из одной компоненты делает все карты копией одного распределения — так карта Si
+в Map3 повторяла Zr). Выбор указан над графиками.
 <i>«Локальный PCA, плитки N px»</i> (по мотивам «Spatial Local wPCA» в MSA): карта режется на плитки N×N с
 перекрытием в полплитки, каждая раскладывается отдельно. Фаза, занимающая часть карты (сегрегация на границе,
 отдельные частицы), в своей плитке выходит над шумом раньше, чем во всей карте. Модель плитки — выбранная
@@ -781,13 +784,15 @@ class MainWindow(QtWidgets.QMainWindow):
                                        'компоненты выше границы шума — сигнал')
         row.addWidget(self.cb_pca_poisson)
         self.cb_pca_bin = QtWidgets.QComboBox()
-        self.cb_pca_bin.addItems(['нет', '2×2', '4×4'])
+        self.cb_pca_bin.addItems(['авто', 'нет', '2×2', '4×4'])
         self.cb_pca_bin.setToolTip(
             'Разложение (собственные значения, спектры компонент, граница шума) — по данным, просуммированным '
             'по блокам пикселей, как «Spatial binning» в MSA (HREM Research). Шум на блок растёт медленнее '
             'сигнала протяжённой фазы: слабые протяжённые компоненты выходят над шумом. '
             'Карты (счета) — проекции спектров исходных пикселей: полное разрешение сохраняется. '
-            'Детали меньше блока выделяются хуже. Применяется кнопкой «Вычислить PCA»')
+            'Детали меньше блока выделяются хуже. «авто» — без биннинга, но если так находится только одна '
+            'сигнальная компонента (мало отсчётов на пиксель: тогда все карты после PCA повторяют одно '
+            'распределение), пробуются 2×2 и 4×4. Применяется кнопкой «Вычислить PCA»')
         row.addWidget(hbox(QtWidgets.QLabel('Биннинг для разложения:'), self.cb_pca_bin))
         self.cb_pca_local = QtWidgets.QCheckBox('локальный PCA, плитки')
         self.cb_pca_local.setToolTip(
@@ -2661,9 +2666,29 @@ class MainWindow(QtWidgets.QMainWindow):
             drift=self.cb_pre_drift.isChecked(), pixels=self.cb_pre_px.isChecked(),
             pixel_sigma=self.sp_pre_sigma.value())
         self.show_preprocessing()
-        binning = (1, 2, 4)[self.cb_pca_bin.currentIndex()]
+        choice = self.cb_pca_bin.currentIndex()
+        binning = (1, 1, 2, 4)[choice]
         self.pca = core.pca_decompose(self.si_pre, self._pca_range, poisson=self.cb_pca_poisson.isChecked(),
                                       binning=binning)
+        self._pca_bin_note = ''
+        if choice == 0 and self.pca.suggested <= 1:
+            # one component: every map rebuilt from it repeats one distribution. With few counts per pixel the
+            # sparse Poisson noise hides the second phase (Map3: Zr core / Zn shell, ~20 counts per pixel); the
+            # sums over blocks bring it above the noise
+            for b in (2, 4):
+                if min(self.si_pre.data.shape[:2]) < 2 * b:
+                    break
+                q = core.pca_decompose(self.si_pre, self._pca_range, poisson=self.cb_pca_poisson.isChecked(),
+                                       binning=b)
+                if q.suggested > self.pca.suggested:
+                    self.pca, binning = q, b
+                    self._pca_bin_note = (f'Биннинг {b}×{b} выбран автоматически: без биннинга — только одна '
+                                          f'сигнальная компонента (мало отсчётов на пиксель).')
+                    break
+            else:
+                self._pca_bin_note = ('<span style="color:#ffb000;">⚠ Только одна сигнальная компонента (и с биннингом '
+                                      '2×2, 4×4): восстановленные карты всех элементов повторят одно распределение — '
+                                      'для карт PCA здесь не подходит.</span>')
         p = self.pca
         self.pca_local = None
         if self.cb_pca_local.isChecked():
@@ -2691,6 +2716,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._pca_k_applied = None
             self.apply_pca()
         msg = f'PCA: {int(p.signal.sum())} сигнальных компонент'
+        if self._pca_bin_note:
+            msg += ' — ' + re.sub('<[^>]+>', '', self._pca_bin_note)
         if self.pca_local is not None:
             a = self.local_added()
             msg += f'; локальный PCA: {len(a)} плиток, добавлено в {int((a > 0).sum())}'
@@ -2801,8 +2828,10 @@ class MainWindow(QtWidgets.QMainWindow):
         lo, hi = self._pca_range
         how = ('выбраны вручную' if self.pca_manual is not None
                else f'первые k = {k}' + (', без шумовых' if self.cb_pca_skip.isChecked() else ''))
+        note = getattr(self, '_pca_bin_note', '')
         self.lbl_pca.setText(
-            f'{lo:.2f}–{hi:.2f} кэВ, {len(p.sel)} каналов × {nx * ny} пикселей, '
+            (f'{note}<br>' if note else '')
+            + f'{lo:.2f}–{hi:.2f} кэВ, {len(p.sel)} каналов × {nx * ny} пикселей, '
             + (f'разложение по блокам {p.binning}×{p.binning} ({ny // p.binning}×{nx // p.binning}), карты — в '
                f'полном разрешении, ' if p.binning > 1 else '')
             + (f'пуассоновская нормировка. Сигнальных компонент (над границей шума Марченко–Пастур, со связной '
