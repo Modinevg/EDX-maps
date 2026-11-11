@@ -36,6 +36,8 @@ PALETTE = ['#ff4b4b', '#3cff5a', '#4b8bff', '#ffd23c', '#ff4bff', '#3cf0ff', '#f
 C_DATA, C_BG, C_MODEL, C_RL = '#d8dbe0', '#5fbf5f', '#ff5050', '#c78bff'
 
 BG_METHODS = ('snip', 'minima', 'poly', 'none')     # order of the items of the background method box
+MAP_METHODS = ('mlls', 'mfwls', 'window_net', 'window')     # order of the items of the map method box
+DEC_METHODS = ('pca', 'ica', 'nmf')                 # order of the items of the «Компоненты» box (PCA page)
 
 HELP = """<h3>Обработка EDX спектральных изображений (FEI TIA, EDAX Genesis / TEAM)</h3>
 <ol>
@@ -95,7 +97,14 @@ xraylib с поправками по спектру Pt + Au): без них ос
 априорными ограничениями около значений модели. Убирает систематические остатки (L-линии переходных
 металлов, Nb L); найденная форма затем используется в картах MLLS. «По модели детектора» — сбросить её.</li>
 <li><b>Карты</b>: MLLS — попиксельный фит теми же формами линий (разделение перекрытий); «окно − фон»
-и «окно» — классические карты. Сглаживание/бининг, цвет каждого элемента, яркость, контраст, гамма,
+и «окно» — классические карты. <i>mfWLS</i> (Wahlqvist & Ek, Microsc. Microanal. 31 (2025) ozae106: «фит
+суммарного спектра + взвешенный МНК» как альтернатива PCA) — это MLLS, в котором все серии элемента
+(Zr K + Zr L, Pt L + Pt M) образуют один профиль с отношениями из суммарного спектра: одна карта на элемент
+из отсчётов всех его серий. Сама схема статьи (формы из фита суммарного спектра, попиксельный МНК с весами
+1 / суммарный спектр, без PCA) — это и есть карты MLLS; mfWLS отличается только объединением серий.
+На тестовых картах суммарная карта элемента по mfWLS совпадает с суммой карт серий MLLS (шум меньше на 0–7 %,
+больше всего у перекрывающихся серий: Pt L + M); отношение серий от пикселя к пикселю (поглощение) не видно.
+Сглаживание/бининг, цвет каждого элемента, яркость, контраст, гамма,
 режим смешивания. По умолчанию каждая карта растянута на весь диапазон цветов по своим процентилям —
 яркость разных карт не сравнима, слабая линия (особенно после PCA, без шума) выглядит как сильная.
 <i>«Общая шкала для всех карт»</i> показывает все карты в одном диапазоне 0 … максимум (чистые отсчёты на
@@ -114,6 +123,11 @@ xraylib с поправками по спектру Pt + Au): без них ос
 изображение с областью карт, композит, все карты — отдельными рисунками). В MLLS серии ниже 1 кэВ
 (Nb M, Fe L…) по умолчанию следуют за основной серией элемента — так они не обмениваются шумом с C K, O K.
 Карта слабой линии (C K ~0.1 отсчёта на пиксель) по отдельным пикселям — в основном шум: используйте бининг.
+<i>Отрицательные значения</i> в картах MLLS и «окно − фон» нормальны: карта — чистые отсчёты (данные минус фон и
+соседние линии), и там, где элемента мало, пуассоновский шум даёт значения по обе стороны от нуля (в Map3 при
+~20 отсчётах на пиксель так у трети пикселей Si). Их не обрезают до 0: тогда сумма и средние по областям
+были бы завышены (Si +20 %, C +60 %). В экспорт TIFF / NPZ карты идут как есть; на экране нижняя граница
+контраста — нижний процентиль (обычно отрицательный), «Общая шкала» начинается с 0.
 <i>Фон по фазам</i> (по умолчанию): пиксели автоматически делятся на фазы, у каждой своя форма фона — иначе
 слабые линии получают ложный контраст между фазами. «Окно − фон − перекрытия» вычитает также хвосты соседних
 линий (Nb M в окне C K). Количественное сравнение слабого элемента между областями надёжнее делать фитом
@@ -177,8 +191,23 @@ xraylib с поправками по спектру Pt + Au): без них ос
 номера можно ввести в поле «Состав» («1-3, 5»); компонента 1 (средний спектр) входит всегда; изменение k или
 «Авто» возвращает автоматический выбор. Карты счетов: структура — сигнал, «соль с перцем» — шум.
 Спектры компонент начиная со второй знакопеременны: это не спектры фаз, а отклонения от среднего спектра
-(«больше Ti и меньше Na, O, чем в среднем»), знак произволен; спектр пикселя = сумма компонент с его счетами.
-Галочка <i>«Использовать восстановленные данные»</i> подставляет данные, восстановленные по выбранным
+(«больше Ti и меньше Na, O, чем в среднем»), знак произволен; спектр пикселя = сумма компонент с его счетами.<br>
+<i>«Компоненты: ICA / NMF»</i> — другие компоненты той же модели (их число и состав — по модели PCA: k,
+«Состав»). <b>ICA</b> (Independent Component Analysis, FastICA по спектрам компонент, как blind source
+separation в HyperSpy) поворачивает компоненты модели к статистически наиболее независимым: рентгеновские
+спектры разреженные (пики), и независимые компоненты обычно ближе к спектрам фаз или групп элементов, которые
+меняются вместе, чем знакопеременные отклонения PCA. Подпространство то же, восстановленные данные не меняются;
+знак и масштаб произвольны. <b>NMF</b> (Non-negative Matrix Factorization): данные ≈ Σ карта × спектр, где карты
+и спектры ≥ 0 — аддитивные части, обычно спектры фаз и карты отсчётов каждой фазы на пиксель (% у карты — доля
+всех отсчётов). Пуассоновское правдоподобие (дивергенция Кульбака–Лейблера), мультипликативные обновления
+(Lee & Seung) по ненулевым отсчётам; на больших картах спектры находятся по блокам пикселей, карты — в полном
+разрешении при фиксированных спектрах; старт — группы пикселей (k-means по счетам PCA), поэтому результат
+воспроизводим. Решение NMF не единственно, другое k даёт другое разбиение. NMF большой карты (400×512) —
+10–30 с. Данные «по компонентам NMF» — модель NMF; число компонент то же, что у PCA, поэтому слабый элемент с
+собственным распределением теряется так же (пометка ⚠ PCA / NMF под композитом). «Экспорт PCA…» в режиме ICA /
+NMF сохраняет также их спектры (CSV) и карты (TIFF).<br>
+Галочка <i>«Использовать восстановленные данные»</i> (она же «Данные PCA / NMF» на вкладке «Карты» панели
+«Обработка») подставляет данные, восстановленные по выбранным
 компонентам (из предобработанных данных), во все спектры (ROI), фит и карты. Деталь, не попавшая в отдельную
 компоненту (редкое включение, слабый элемент с собственным распределением), после PCA повторяет распределение
 основных фаз. Поэтому при картах по данным PCA строятся и карты данных до PCA (после предобработки), и для
@@ -830,6 +859,23 @@ class MainWindow(QtWidgets.QMainWindow):
                                      'Изменение k, «без шумовых» или «Авто» возвращает автоматический выбор')
         self.ed_pca_comps.editingFinished.connect(self.on_pca_comps_edited)
         row.addWidget(hbox(QtWidgets.QLabel('Состав:'), self.ed_pca_comps))
+        # other components of the same model: ICA (rotation of the PCA model) and NMF (non-negative parts)
+        self.cb_dec = QtWidgets.QComboBox()
+        self.cb_dec.addItems(['PCA', 'ICA', 'NMF'])
+        for i, tip in enumerate((
+                'Компоненты PCA: средний спектр и отклонения от него (знакопеременные спектры и карты).',
+                'Independent Component Analysis: спектры компонент модели PCA поворачиваются к статистически '
+                'наиболее независимым (FastICA, как в HyperSpy). Компоненты ближе к спектрам фаз или групп '
+                'элементов, меняющихся вместе. Подпространство то же: восстановленные данные — данные PCA.',
+                'Non-negative Matrix Factorization: данные ≈ Σ карта × спектр, карты и спектры ≥ 0 — аддитивные '
+                'части, обычно спектры фаз и карты их отсчётов. Пуассоновское правдоподобие; число компонент = '
+                'число компонент модели PCA, старт — группы пикселей по счетам PCA. Восстановленные данные — '
+                'по компонентам NMF. Большие карты: несколько секунд — десятки секунд.')):
+            self.cb_dec.setItemData(i, tip, Qt.ToolTipRole)
+        self.cb_dec.setToolTip('Какие компоненты показывать (карты и спектры) и по каким восстанавливать данные. '
+                               'Число компонент и их выбор — по модели PCA (k, «Состав»)')
+        self.cb_dec.currentIndexChanged.connect(self.on_dec_changed)
+        row.addWidget(hbox(QtWidgets.QLabel('Компоненты:'), self.cb_dec))
         self.cb_pca_use = QtWidgets.QCheckBox('Использовать восстановленные данные')
         self.cb_pca_use.setToolTip('Данные, восстановленные по k компонентам, подставляются во все спектры (ROI), '
                                    'фит и карты')
@@ -837,8 +883,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_pca_use.toggled.connect(self.apply_pca)
         row.addWidget(self.cb_pca_use)
         b = QtWidgets.QPushButton('Экспорт PCA…')
-        b.setToolTip('Собственные значения и нагрузки (CSV), счета (TIFF float32), всё вместе с отчётом '
-                     'предобработки (NPZ)')
+        b.setToolTip('Собственные значения и нагрузки (CSV), счета (TIFF float32), в режиме ICA / NMF — также их '
+                     'спектры (CSV) и карты (TIFF), всё вместе с отчётом предобработки (NPZ)')
         b.clicked.connect(self.export_pca)
         row.addWidget(b)
         v.addLayout(row)
@@ -914,12 +960,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pca_views = []
         self.pca_sel = 0
         self._pca_ncols = 0
+        self._dec = None                # (key, core.Components) of ICA / NMF, see decomp()
         self._pca_grid_timer = QtCore.QTimer(self)
         self._pca_grid_timer.setSingleShot(True)
         self._pca_grid_timer.timeout.connect(self.render_pca)
         self._pca_apply_timer = QtCore.QTimer(self)
         self._pca_apply_timer.setSingleShot(True)
         self._pca_apply_timer.timeout.connect(self.apply_pca)
+        # NMF of a changed model: computed once the changes stop (the previous one is shown meanwhile)
+        self._dec_timer = QtCore.QTimer(self)
+        self._dec_timer.setSingleShot(True)
+        self._dec_timer.timeout.connect(self.refresh_dec)
         return page
 
     def _build_bg_tab(self):
@@ -1173,10 +1224,16 @@ class MainWindow(QtWidgets.QMainWindow):
         g = QtWidgets.QGroupBox('Расчёт карт')
         f = QtWidgets.QFormLayout(g)
         self.cb_map_method = QtWidgets.QComboBox()
-        self.cb_map_method.addItems(['MLLS-фит (деконволюция перекрытий)', 'Окно − фон − перекрытия', 'Окно (брутто)'])
+        self.cb_map_method.addItems(['MLLS-фит (деконволюция перекрытий)', 'mfWLS (серии элемента одним профилем)',
+                                     'Окно − фон − перекрытия', 'Окно (брутто)'])
         for i, tip in enumerate((
                 'Попиксельный фит формами линий и фоном: перекрытия разделяются, фон вычитается. '
                 'Рекомендуется, особенно для слабых элементов.',
+                'mfWLS (Wahlqvist & Ek, Microsc. Microanal. 31 (2025) ozae106): фит суммарного спектра, затем '
+                'попиксельный взвешенный МНК с этими формами — как MLLS, но все серии элемента (Zr K + Zr L, '
+                'Pt L + Pt M…) образуют один профиль с отношениями из суммарного спектра: одна карта на элемент, '
+                'в неё идут отсчёты всех серий. Карты серий одного элемента отличаются только множителем; '
+                'изменение отношения серий от пикселя к пикселю (поглощение) не видно.',
                 'Отсчёты в окне ±0.6 FWHM вокруг главной линии минус фон и хвосты соседних линий '
                 '(например, Nb M в окне C K) из попиксельного фита. Менее чувствителен к неточной форме '
                 'собственного пика, чем MLLS.',
@@ -1203,6 +1260,17 @@ class MainWindow(QtWidgets.QMainWindow):
             'по минимумам. '
             'Фазы: список «Изображение» на вкладке «Спектр»')
         f.addRow(self.cb_phase_bg)
+        # the same switch as «Использовать восстановленные данные» on the PCA page (kept in sync both ways)
+        self.cb_pca_use_maps = QtWidgets.QCheckBox('Данные PCA / NMF (восстановленные по компонентам)')
+        self.cb_pca_use_maps.setToolTip(
+            'То же, что «Использовать восстановленные данные» на вкладке PCA (галочки связаны): данные, '
+            'восстановленные по выбранным компонентам PCA (или NMF, если там выбрано «Компоненты: NMF»), '
+            'подставляются во все спектры (ROI), фит и карты; снять — исходные данные. Доступно после '
+            '«Вычислить PCA» на вкладке PCA')
+        self.cb_pca_use_maps.setEnabled(False)
+        self.cb_pca_use_maps.toggled.connect(self.cb_pca_use.setChecked)
+        self.cb_pca_use.toggled.connect(self._sync_pca_use)
+        f.addRow(self.cb_pca_use_maps)
         b = QtWidgets.QPushButton('Построить карты')
         b.setStyleSheet('font-weight:bold; padding:5px;')
         b.clicked.connect(self.run_maps)
@@ -2286,7 +2354,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 t.setItem(i, j, it)
         if self.fit is not None:
             d = self.fit.det
-            note = ('<br><span style="color:#ff9b2d;">Данные PCA: шум удалён, поэтому χ² и ± σ занижены '
+            note = (f'<br><span style="color:#ff9b2d;">Данные {self.rec_name()}: шум удалён, поэтому χ² и ± σ занижены '
                     '(для погрешностей фитируйте исходные данные).</span>' if self.pca_k() else '')
             thr = f', порог = {d.thr * 1000:.0f} эВ' if d.thr > 0 else ''
             shape = (f'; форма пиков: NLLS ({len(d.widths) or len(d.ratios)} серий)' if d.widths or d.ratios
@@ -2353,7 +2421,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _compute_maps(self):
         fams = self.families()
         self.ui_to_det()
-        method = ['mlls', 'window_net', 'window'][self.cb_map_method.currentIndex()]
+        method = MAP_METHODS[self.cb_map_method.currentIndex()]
         weight = None   # weights of the per-pixel least squares: sum-spectrum model if available
         if self.fit is not None and not self.cb_roi.isChecked():
             weight = np.maximum(self.fit.model, 1.0)
@@ -2370,21 +2438,22 @@ class MainWindow(QtWidgets.QMainWindow):
             check_si = self.si_pre
         self._check_cache = {}
         self._struct_cache = {}
-        self.map_checks = self._check_maps(check_si, fams, weight, bg_model) if method == 'mlls' else {}
+        self.map_checks = (self._check_maps(check_si, fams, weight, bg_model, method == 'mfwls')
+                           if method in ('mlls', 'mfwls') else {})
         self.map_views = []
         self._blem_cache = {}
         self.build_map_table()
         self.render_maps()
         self._fill_image_boxes()
         self.update_si_image()
-        pca =f', данные PCA ({self.pca_desc()})' if self.pca_k() else ''
+        pca = f', данные {self.rec_name()} ({self.pca_desc()})' if self.pca_k() else ''
         self.statusBar().showMessage(f'Карты построены ({self.cb_map_method.currentText()}{pca}): {len(fams)} серий')
 
-    def _check_maps(self, si, fams, weight, bg_model):
+    def _check_maps(self, si, fams, weight, bg_model, tie_all=False):
         """core.map_background_check of the maps: {family key: MapCheck}. si: the measured data - the PCA
         input when the maps are of PCA data (the background under a line is a property of the measured
         spectra, their counts give the statistical errors; the verdict does not change with the PCA).
-        bg_model: (shape, n_bg) of the maps of si. Background models: that of the maps, the same x a
+        tie_all: mfWLS maps. bg_model: (shape, n_bg) of the maps of si. Background models: that of the maps, the same x a
         polynomial 2 and 4 orders higher and, for SNIP, a 1.5x wider SNIP window. Phases: those of the
         phase backgrounds (computed for the check if those are off)."""
         if np.prod(si.shape) < 100:
@@ -2403,7 +2472,7 @@ class MainWindow(QtWidgets.QMainWindow):
             models.append(('SNIP ×1.5', wide, n_bg))
         checks = core.map_background_check(si, fams, self.det, labels, models, self.erange(),
                                            weight if weight is not None else si.sum_spectrum(), self.noise_peak(),
-                                           self.cb_tie_low.isChecked(), spectra=spectra)
+                                           self.cb_tie_low.isChecked(), spectra=spectra, tie_all=tie_all)
         return {f.key: c for f, c in zip(fams, checks) if c is not None}
 
     def phase_labels(self):
@@ -2424,6 +2493,66 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.pca_manual is not None:
             return self.pca_manual
         return core.pca_components(self.pca, self.sp_pca_k.value(), self.cb_pca_skip.isChecked())
+
+    def dec_method(self):
+        """'pca', 'ica' or 'nmf': the components shown on the PCA page («Компоненты»)."""
+        return DEC_METHODS[self.cb_dec.currentIndex()]
+
+    def decomp(self, stale_ok=False):
+        """ICA / NMF components (core.Components) of the current PCA model, cached; None for PCA. stale_ok: an
+        NMF of the previous model of the same PCA is returned while the model changes (k spin box, clicks: NMF
+        of a large map takes seconds), the new one is computed when the changes stop (refresh_dec)."""
+        m = self.dec_method()
+        if m == 'pca' or self.pca is None:
+            return None
+        comps = self.pca_model()
+        key = (m, id(self.pca), comps)
+        if self._dec is None or self._dec[0] != key:
+            if m == 'nmf' and stale_ok and self._dec is not None and self._dec[0][:2] == key[:2]:
+                self._dec_timer.start(800)
+                return self._dec[1]
+            if m == 'ica':
+                c = core.ica_decompose(self.pca, comps)
+            else:
+                def progress(text):
+                    self.statusBar().showMessage(text)
+                    QtWidgets.QApplication.processEvents()
+                progress(f'NMF: {len(comps)} компонент…')
+                QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+                try:
+                    c = core.nmf_decompose(self.si_pre, self.pca, comps, progress=progress)
+                finally:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                self.statusBar().showMessage(
+                    f'NMF: {len(comps)} компонент, {c.info["iterations"]} итераций'
+                    + (f' по блокам {c.info["binning"]}×{c.info["binning"]}, карты — в полном разрешении'
+                       if c.info['binning'] > 1 else ''))
+            self._dec = (key, c)
+        return self._dec[1]
+
+    def nmf_used(self):
+        """The data in use are rebuilt from the NMF components."""
+        return self.dec_method() == 'nmf' and self.pca is not None and self.cb_pca_use.isChecked()
+
+    def rec_name(self):
+        """'NMF' or 'PCA': the decomposition the data in use are rebuilt from (ICA: those of the PCA)."""
+        return 'NMF' if self.nmf_used() else 'PCA'
+
+    @guarded
+    def refresh_dec(self):
+        """The NMF of the current model (after the changes stopped), shown."""
+        if self.pca is not None and self.dec_method() == 'nmf':
+            self.decomp()
+            self.render_pca()
+
+    @guarded
+    def on_dec_changed(self, *args):
+        if self.pca is None:
+            return
+        self.pca_sel = 0
+        self.render_pca()
+        if self.cb_pca_use.isChecked():     # NMF <-> PCA / ICA: other reconstruction
+            self.apply_pca()
 
     def set_pca_model(self, comps):
         """Model of the components `comps` chosen by hand (component 1, the mean spectrum, is always kept);
@@ -2478,9 +2607,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_pca_k.blockSignals(False)
         self.on_pca_k_changed()
 
+    def _sync_pca_use(self, *args):
+        """The «Данные PCA» box of the maps controls mirrors «Использовать восстановленные данные»."""
+        m = getattr(self, 'cb_pca_use_maps', None)
+        if m is None:
+            return
+        m.blockSignals(True)
+        m.setChecked(self.cb_pca_use.isChecked())
+        m.setEnabled(self.cb_pca_use.isEnabled())
+        m.blockSignals(False)
+
     def pca_local_used(self):
-        """The data in use are rebuilt by the global model complemented by the local PCA."""
-        return self.pca_local is not None and self.cb_pca_use.isChecked()
+        """The data in use are rebuilt by the global model complemented by the local PCA (not with NMF)."""
+        return self.pca_local is not None and self.cb_pca_use.isChecked() and self.dec_method() != 'nmf'
 
     def local_added(self):
         """Local directions added to the global model in every tile (core.local_pca_added), cached."""
@@ -2507,6 +2646,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return ''
         unit = 'comp.' if en else 'комп.'
         out = f'{len(c)} {unit}' if c == tuple(range(len(c))) else f'{len(c)} {unit}: {ranges_text(c)}'
+        if self.nmf_used():
+            return f'{len(c)} {unit}, ' + ('from PCA model ' if en else 'по модели PCA ') + ranges_text(c)
         if self.pca_local_used():
             a = self.local_added()
             out += (f' + local PCA ({self.pca_local.tile}-px tiles, added in {int((a > 0).sum())} of {len(a)})' if en
@@ -2527,10 +2668,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_si_image()
         self.pca_manual = None
         self._pca_k_applied = ()
+        self._dec = None
         self.cb_pca_use.blockSignals(True)
         self.cb_pca_use.setChecked(False)
         self.cb_pca_use.blockSignals(False)
         self.cb_pca_use.setEnabled(False)
+        self._sync_pca_use()
         self.sp_pca_k.setEnabled(False)
         self.ed_pca_comps.setEnabled(False)
         self.ed_pca_comps.setText('')
@@ -2636,6 +2779,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 w.writerow([f'{Es[j]:.5f}'] + [f'{v:.6g}' for v in loadings[:, j]])
         scores = np.stack([p.score_map(i) for i in range(n)]).astype(np.float32)
         tifffile.imwrite(os.path.join(out, 'scores.tif'), scores)
+        # ICA / NMF components shown: <method>_spectra.csv, <method>_maps.tif (data ~ sum maps x spectra)
+        dec, extra = self.decomp(), {}
+        if dec is not None:
+            tag = dec.method
+            with open(os.path.join(out, f'{tag}_spectra.csv'), 'w', newline='', encoding='utf-8') as fh:
+                w = csv.writer(fh)
+                w.writerow(['energy_keV'] + [f'{tag}_{i + 1}' for i in range(len(dec.spectra))])
+                for j in range(len(Es)):
+                    w.writerow([f'{Es[j]:.5f}'] + [f'{v:.6g}' for v in dec.spectra[:, j]])
+            tifffile.imwrite(os.path.join(out, f'{tag}_maps.tif'), dec.maps.astype(np.float32))
+            extra = {f'{tag}_spectra': dec.spectra, f'{tag}_maps': dec.maps,
+                     f'{tag}_from_pca_components': np.array(dec.source) + 1, f'{tag}_info': repr(dec.info)}
         dr = r.drift or {}
         lp = self.pca_local
         local = {} if lp is None else dict(     # tiles of the local PCA: (y0, x0, h, w), signal / added components
@@ -2652,7 +2807,7 @@ class MainWindow(QtWidgets.QMainWindow):
             drift_rows=np.asarray(dr.get('rows', [])), drift_keV=np.asarray(dr.get('shift', [])),
             drift_err_keV=np.asarray(dr.get('err', [])), drift_peaks_keV=np.asarray(dr.get('peaks', ())),
             drift_p=dr.get('p', np.nan), drift_applied=r.drift_applied, bad_pixels=r.bad_pixels,
-            bad_pixel_sigma=r.pixel_z, **local)
+            bad_pixel_sigma=r.pixel_z, **local, **extra)
 
     @guarded
     def run_pca(self):
@@ -2700,6 +2855,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 binning=binning, skip_noise=self.cb_pca_skip.isChecked(), progress=progress)
         self._fill_image_boxes()
         self.pca_manual = None
+        self._dec = None
         self.sp_pca_k.blockSignals(True)
         self.sp_pca_k.setMaximum(len(p.factors))
         self.sp_pca_k.setValue(p.suggested)
@@ -2707,6 +2863,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_pca_k.setEnabled(True)
         self.ed_pca_comps.setEnabled(True)
         self.cb_pca_use.setEnabled(True)
+        self._sync_pca_use()
         self.pca_sel = 0
         self.main_tabs.setCurrentIndex(2)
         QtWidgets.QApplication.processEvents()
@@ -2742,10 +2899,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         comps = self.pca_comps()
         lp = self.pca_local if self.pca_local_used() else None
-        key = ('local', id(lp), lp.skip_noise, comps) if lp is not None else comps
+        nmf = bool(comps) and self.nmf_used()
+        key = (('local', id(lp), lp.skip_noise, comps) if lp is not None
+               else ('nmf', id(self.pca), comps) if nmf else comps)
         if key == self._pca_k_applied:
             return
-        if lp is not None:
+        if nmf:
+            self.si = replace(self.si_pre, data=core.components_reconstruct(self.si_pre, self.decomp()))
+        elif lp is not None:
             self.si = replace(self.si_pre, data=core.local_pca_reconstruct(self.si_pre, lp, self.pca, comps))
         else:
             self.si = (replace(self.si_pre, data=core.pca_reconstruct(self.si_pre, self.pca, comps)) if comps
@@ -2756,9 +2917,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.maps is not None and self.families():
             self._compute_maps()
         base = self.status_info.text().split('  |  ')[0]
-        self.status_info.setText(base + (f'  |  PCA: {self.pca_desc()}' if comps else ''))
-        self.statusBar().showMessage(f'Данные: восстановлены по компонентам PCA ({self.pca_desc()})' if comps
-                                     else 'Данные: исходные')
+        self.status_info.setText(base + (f'  |  {self.rec_name()}: {self.pca_desc()}' if comps else ''))
+        self.statusBar().showMessage(f'Данные: восстановлены по компонентам {"NMF" if nmf else "PCA"} '
+                                     f'({self.pca_desc()})' if comps else 'Данные: исходные')
 
     def render_pca(self, *args):
         p = self.pca
@@ -2784,8 +2945,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scree_cut.setValue(k + 0.5)
         self.scree_pw.getPlotItem().setXRange(0.5, min(len(rel), 60) + 0.5, padding=0)
 
-        # maps of all kept components; tiles are sized so that the first 12 fill the visible area
-        n = len(p.factors)
+        # maps of all kept components (ICA / NMF: of the model's); the first 12 fill the visible area
+        dec = self.decomp(stale_ok=True)
+        n = len(p.factors) if dec is None else len(dec.spectra)
+        self.pca_sel = min(self.pca_sel, n - 1)
         n_fit = min(n, 12)
         ny, nx = p.shape
         sa = self.pca_scroll
@@ -2808,17 +2971,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 img = pg.ImageItem()
                 vb.addItem(img)
                 self.pca_views.append(dict(vb=vb, img=img, label=lab, fresh=True))
-        # scores: blue - black - red, symmetric around zero
+        # scores: blue - black - red, symmetric around zero; NMF maps (>= 0): black - orange
         lut = pg.ColorMap([0, 0.5, 1], [(70, 130, 255), (0, 0, 0), (255, 85, 55)]).getLookupTable(0.0, 1.0, 256)
+        lut_pos = pg.colormap.get('inferno').getLookupTable(0.0, 1.0, 256)
+        shares = dec.shares() if dec is not None else None
         for i, v in enumerate(self.pca_views):
-            m = p.score_map(i)
+            m = p.score_map(i) if dec is None else dec.score_map(i)
             a = float(np.percentile(np.abs(m), 99.5)) or 1.0
-            v['img'].setImage(m, levels=(-a, a), lut=lut)
+            if dec is not None and dec.method == 'nmf':
+                v['img'].setImage(m, levels=(0, a), lut=lut_pos)
+            else:
+                v['img'].setImage(m, levels=(-a, a), lut=lut)
             if v.pop('fresh', False):
                 v['vb'].autoRange(padding=0.01)
+            sel_mark = ' ◀' if i == self.pca_sel else ''
+            if dec is not None:
+                v['label'].setText(f'<span style="color:#8cb4ff; font-weight:bold; font-size:10pt;">'
+                                   f'{dec.method.upper()} #{i + 1}{sel_mark}</span><br><span style="color:#999; '
+                                   f'font-size:9pt;">{shares[i] * 100:.1f} % отсчётов, r = {dec.autocorr[i]:.2f}</span>')
+                continue
             inm = i in used
             col = ('#3cff5a' if sig[i] else '#ff9b2d') if inm else '#888'
-            mark = (' ✓' if inm else '') + ('' if sig[i] else ' шум') + (' ◀' if i == self.pca_sel else '')
+            mark = (' ✓' if inm else '') + ('' if sig[i] else ' шум') + sel_mark
             v['label'].setText(f'<span style="color:{col}; font-weight:bold; font-size:10pt;">#{i + 1}{mark}</span>'
                                f'<br><span style="color:#999; font-size:9pt;">λ/λш = {rel[i]:.3g}, '
                                f'r = {p.autocorr[i]:.2f}</span>')
@@ -2844,7 +3018,28 @@ class MainWindow(QtWidgets.QMainWindow):
             f'r — корреляция соседних пикселей карты{" (по блокам разложения)" if p.binning > 1 else ""} '
             f'(≈0 у шума). Щелчок по карте — нагрузка (loading) компоненты на графике слева; '
             f'<b>двойной щелчок по карте или щелчок по точке графика — добавить / убрать компоненту</b>.'
-            + self.local_pca_text())
+            + self.local_pca_text() + self.dec_text(dec))
+
+    def dec_text(self, dec):
+        """Description of the ICA / NMF components for the label of the PCA tab ('' for PCA)."""
+        if dec is None:
+            return ''
+        k = len(dec.spectra)
+        if dec.method == 'ica':
+            return (f'<br><b>ICA</b>: {k} независимых компонент модели PCA ({ranges_text(dec.source)}; FastICA по '
+                    f'спектрам, {dec.info["iterations"]} итераций). Это поворот тех же компонент: восстановленные '
+                    f'данные — данные PCA. Знак и масштаб компоненты произвольны (здесь: карта в основном '
+                    f'положительна, Σ|спектр| = 1); спектр может иметь отрицательные участки. Состав модели '
+                    f'меняется в режиме PCA или на графике собственных значений.')
+        i = dec.info
+        how = (f'спектры — по блокам {i["binning"]}×{i["binning"]} пикселей, карты — в полном разрешении '
+               f'({i["map_iterations"]} итераций при фиксированных спектрах)' if i['binning'] > 1
+               else 'по всем пикселям')
+        return (f'<br><b>NMF</b>: {k} неотрицательных компонент (столько же, сколько в модели PCA '
+                f'{ranges_text(dec.source)}); пуассоновское правдоподобие, {i["iterations"]} итераций, {how}. '
+                f'Карты — отсчёты компоненты на пиксель (Σ спектр = 1), % — доля всех отсчётов. «Использовать '
+                f'восстановленные данные» — данные по компонентам NMF. Решение NMF не единственно: другое k даёт '
+                f'другое разбиение на части.')
 
     def local_pca_text(self):
         """Summary of the local PCA for the label of the PCA tab ('' without it)."""
@@ -2863,9 +3058,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_pca_component(self, i):
         p = self.pca
         E = self.si_raw.energy[p.sel]
-        y = p.spectrum(i)
+        dec = self.decomp(stale_ok=True)
+        y = p.spectrum(i) if dec is None else dec.spectrum(i)
         self.load_curve.setData(E, y)
-        self.load_pw.getPlotItem().setTitle(f'Компонента #{i + 1}: нагрузка (loading) — спектр, знак произволен')
+        self.load_pw.getPlotItem().setTitle(
+            f'Компонента #{i + 1}: нагрузка (loading) — спектр, знак произволен' if dec is None
+            else f'ICA #{i + 1}: спектр независимой компоненты (знак и масштаб произвольны)' if dec.method == 'ica'
+            else f'NMF #{i + 1}: спектр компоненты (≥ 0, сумма = 1)')
         for it in self._pca_marks:
             self.load_pw.removeItem(it)
         self._pca_marks = []
@@ -2890,10 +3089,13 @@ class MainWindow(QtWidgets.QMainWindow):
         for i, v in enumerate(self.pca_views):
             if v['vb'].sceneBoundingRect().contains(pos):
                 self.pca_sel = i
-                if ev.double():
+                if ev.double() and self.dec_method() == 'pca':
                     self.toggle_pca_component(i)    # renders too
                 else:
                     self.render_pca()
+                    if ev.double():
+                        self.statusBar().showMessage('Компоненты ICA / NMF строятся по модели PCA: состав модели '
+                                                     'меняется в режиме PCA или щелчком по точке графика')
                 break
 
     def pca_map_check(self, el, fam):
@@ -3210,15 +3412,16 @@ class MainWindow(QtWidgets.QMainWindow):
                                   f'{self.map_rows[el]["fam"].currentText()}</span>' for el in els)
         info = self.maps_info()
         if self.pca_k():
-            info += f'; данные PCA ({self.pca_desc()})'
+            info += f'; данные {self.rec_name()} ({self.pca_desc()})'
             bad = self.pca_flagged()
             if bad:
-                info += ('<br><span style="color:#ff9b2d;">⚠ Карты с PCA не согласуются с исходными данными '
-                         '(доля пространственной структуры, потерянной или добавленной PCA): '
+                name = self.rec_name()
+                info += (f'<br><span style="color:#ff9b2d;">⚠ Карты с {name} не согласуются с исходными данными '
+                         f'(доля пространственной структуры, потерянной или добавленной {name}): '
                          + ', '.join(f'{el} {min(f, 1.0) * 100:.0f} %' for el, f in bad.items())
                          + '. Собственное распределение такого элемента не выделено в компоненту, его карта — '
-                           'комбинация карт основных фаз. Смотрите их по исходным данным (снять «Использовать '
-                           'восстановленные данные», бининг) или фитом спектров ROI.</span>')
+                           'комбинация карт основных фаз. Смотрите их по исходным данным (снять «Данные PCA / NMF» '
+                           'на вкладке «Карты», бининг) или фитом спектров ROI.</span>')
             elif self.maps_raw is not None:
                 info += ' — карты согласуются с картами исходных данных (проверка по остатку)'
         if self.maps.method == 'window':
@@ -3270,7 +3473,8 @@ class MainWindow(QtWidgets.QMainWindow):
             fam = self.map_rows[el]['fam'].currentText()
             rng = f'среднее {m.mean():.3g}' if self.cb_common.isChecked() else f'{lo:.3g} … {hi:.3g}'
             chk = self.pca_map_check(el, fam)
-            warn = ' <span style="color:#ff9b2d;">⚠ PCA</span>' if chk is not None and chk > core.PCA_MAP_LOST else ''
+            warn = (f' <span style="color:#ff9b2d;">⚠ {self.rec_name()}</span>'
+                    if chk is not None and chk > core.PCA_MAP_LOST else '')
             kind = self.map_warning(el, fam)
             if kind:
                 warn += f' <span style="color:#ff9b2d;">⚠ {kind}</span>'
@@ -3289,8 +3493,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def maps_info(self, en=False):
         """'Метод: MLLS-фит; фон по фазам (3); форма пиков из NLLS' - how the maps were computed
         (en: in English, for the presentation export)."""
-        method = {'mlls': ('MLLS-фит', 'MLLS fit'), 'window_net': ('окно − фон − перекрытия',
-                                                                   'window − background − overlaps'),
+        method = {'mlls': ('MLLS-фит', 'MLLS fit'),
+                  'mfwls': ('mfWLS (серии элемента одним профилем)', 'mfWLS (one profile per element)'),
+                  'window_net': ('окно − фон − перекрытия', 'window − background − overlaps'),
                   'window': ('окно (брутто)', 'window (gross counts)')}[self.maps.method][en]
         info = f'{"Method" if en else "Метод"}: {method}'
         if self.maps.method != 'window':
@@ -3623,7 +3828,7 @@ class MainWindow(QtWidgets.QMainWindow):
                  size=20)
         info = self.maps_info(en=True).split('; ')
         if self.pca_k():
-            info.append(f'PCA-reconstructed data ({self.pca_desc(en=True)})')
+            info.append(f'{self.rec_name()}-reconstructed data ({self.pca_desc(en=True)})')
             r = self.pre
             done = ([f'{len(r.dead_channels)} dead channels interpolated'] if len(r.dead_channels) else []) + (
                 ['energy drift corrected'] if r.drift_applied else []) + (
@@ -3631,7 +3836,8 @@ class MainWindow(QtWidgets.QMainWindow):
             info.append('Preprocessing before PCA: ' + (', '.join(done) if done else 'no changes needed'))
             bad = self.pca_flagged()
             if bad:
-                info.append('⚠ PCA maps disagree with the raw data (share of the spatial structure lost or added): '
+                info.append(f'⚠ {self.rec_name()} maps disagree with the raw data (share of the spatial structure '
+                            f'lost or added): '
                             + ', '.join(f'{el} {min(f, 1.0) * 100:.0f} %' for el, f in bad.items()))
         warned = self.map_warnings()
         if warned:

@@ -1707,11 +1707,14 @@ class MapResult:
     bg_maps: np.ndarray = None
 
 
-def map_filter(energy, disp, families, det, bg_shape, n_bg, erange, weight_spectrum, noise=None, tie_low=True):
+def map_filter(energy, disp, families, det, bg_shape, n_bg, erange, weight_spectrum, noise=None, tie_low=True,
+               tie_all=False):
     """The linear per-pixel least squares of compute_maps: (sel, P, pairs, A, B). The coefficients of a
     pixel spectrum y (families, then the background terms) are P @ y[sel]; then coef[j] = r * coef[k]
     for the tied families j: (k, r) in pairs (in this order). A, B: peak and background design matrices
-    on the channels sel. weight_spectrum: the summed spectrum (or its model) - weights and family ratios."""
+    on the channels sel. weight_spectrum: the summed spectrum (or its model) - weights and family ratios.
+    tie_all (mfWLS, Wahlqvist & Ek 2025): every family of an element follows its strongest family at the
+    ratio of the summed spectrum - one profile, one coefficient per element (tie_low is then implied)."""
     sel = np.where((energy >= erange[0]) & (energy <= erange[1]))[0]
     E = energy[sel]
     shape = None if bg_shape is None else np.maximum(np.asarray(bg_shape)[sel], 1e-6 * max(np.max(bg_shape), 1))
@@ -1724,7 +1727,18 @@ def map_filter(energy, disp, families, det, bg_shape, n_bg, erange, weight_spect
     ys = np.asarray(weight_spectrum, float)[sel]
     c, _, _, active = _solve_tied(M, ys, np.maximum(ys, 1.0), nf, _tie_families(families))
     pairs = {jm: (jl, M_TO_L_MAX) for jm, jl in active}
-    if tie_low:
+    if tie_all:
+        for el in dict.fromkeys(f.element for f in families):
+            idx = [i for i, g in enumerate(families) if g.element == el]
+            pos = [i for i in idx if c[i] > 0]
+            if len(idx) < 2 or not pos:
+                continue
+            k = max(pos, key=lambda i: c[i])
+            pairs.pop(k, None)          # the main family follows nothing (an M family tied to its L above)
+            for j in idx:
+                if j != k:
+                    pairs[j] = (k, max(c[j], 0.0) / c[k])
+    elif tie_low:
         for j, f in enumerate(families):
             mains = [i for i, g in enumerate(families)
                      if g.element == f.element and g.main[1] >= TIE_LOW_E and c[i] > 0]
@@ -1747,6 +1761,9 @@ def compute_maps(si, families, det, bg_shape, n_bg=3, erange=(0.2, 20.0), method
     mlls        : weighted linear least squares with fixed peak shapes -> overlapping lines
                   are separated (deconvolved); background = sum-spectrum background shape x
                   Legendre polynomial (n_bg terms).
+    mfwls       : mlls with one profile per element (map_filter tie_all): all families of an element
+                  (Zr K + Zr L, Zn K + Zn L...) at the ratios of the summed spectrum - the mfWLS of
+                  Wahlqvist & Ek, Microsc. Microanal. 31 (2025) ozae106; their maps differ by a factor only.
     window_net  : counts in +-0.6 FWHM around the main line minus the fitted background and the
                   fitted contributions of the other lines (e.g. the Nb M tail in the C K window).
     window      : gross counts in the same window.
@@ -1759,7 +1776,7 @@ def compute_maps(si, families, det, bg_shape, n_bg=3, erange=(0.2, 20.0), method
     if weight_spectrum is None:
         weight_spectrum = si.sum_spectrum()
     sel, P, pairs, A, B = map_filter(energy, si.disp, families, det, bg_shape, n_bg, erange, weight_spectrum,
-                                     noise, tie_low)
+                                     noise, tie_low, tie_all=method == 'mfwls')
     E = energy[sel]
     nf = len(families)
     ny, nx = si.shape
@@ -1777,7 +1794,7 @@ def compute_maps(si, families, det, bg_shape, n_bg=3, erange=(0.2, 20.0), method
         coef[:, j] = r * coef[:, k]
     bgc = coef[:, nf:]
 
-    if method == 'mlls':
+    if method in ('mlls', 'mfwls'):
         maps = coef[:, :nf].T
     else:
         maps = np.empty((nf, npix), dtype=np.float32)
@@ -1833,7 +1850,7 @@ class MapCheck:
 
 
 def map_background_check(si, families, det, labels, models, erange, weight_spectrum, noise=None, tie_low=True,
-                         spectra=None):
+                         spectra=None, tie_all=False):
     """Does the distribution of each family map between the phases (labels) depend on the background
     model? The summed spectra of the phases are fitted by the per-pixel least squares of compute_maps
     (map_filter, method 'mlls') with every model of models = [(name, bg_shape, n_bg), ...], the first one
@@ -1843,7 +1860,8 @@ def map_background_check(si, families, det, labels, models, erange, weight_spect
     contrast between the phases. A model that changes no phase mean beyond 3σ counts as no change.
     Statistical errors: counts x the count dispersion. A weak line under which the background is not fixed
     by the data shows the error of the background model - spread like the main phases - rather than the
-    element (share >= MAP_BG_SHARE). spectra: phase_spectra(si, labels) if already computed.
+    element (share >= MAP_BG_SHARE). spectra: phase_spectra(si, labels) if already computed. tie_all: the
+    maps are mfWLS ones (map_filter).
     Returns a MapCheck per family (None: an empty map, or fewer than 2 phases)."""
     Y, npx = spectra if spectra is not None else phase_spectra(si, labels)
     keep = npx > 0
@@ -1855,7 +1873,7 @@ def map_background_check(si, families, det, labels, models, erange, weight_spect
     F = []
     for _, shape, n_bg in models:
         sel, P, pairs, _, _ = map_filter(si.energy, si.disp, families, det, shape, n_bg, erange, weight_spectrum,
-                                         noise, tie_low)
+                                         noise, tie_low, tie_all)
         Pf = P[:nf].copy()          # effective filter of every family, the tied ones included
         for j, (k, r) in pairs.items():
             Pf[j] = r * Pf[k]
@@ -2654,6 +2672,297 @@ def local_pca_reconstruct(si, lp, pca, comps):
         out[y0:y0 + h, x0:x0 + w] += wt[..., None] * rec.reshape(h, w, nch)
         wsum[y0:y0 + h, x0:x0 + w] += wt
     out /= wsum[..., None]
+    return out
+
+
+# ----------------------------------------------------------------------------------------------
+# ICA and NMF: other components of the same data (the PCA model gives their number and start)
+# ----------------------------------------------------------------------------------------------
+@dataclass
+class Components:
+    """Components of an ICA or NMF decomposition: data ~ sum_i maps[i](y, x) * spectra[i](E) on the channels
+    sel. Every spectrum is scaled to sum |spectrum| = 1 (count scale), so a map gives the counts of its
+    component per pixel. Ordered by the total of the maps."""
+    method: str             # 'ica' | 'nmf'
+    spectra: np.ndarray     # (k, n_sel)
+    maps: np.ndarray        # (k, ny, nx)
+    sel: np.ndarray         # channels (those of the PCA)
+    source: tuple           # components of the PCA model it was computed from
+    autocorr: np.ndarray    # (k,) correlation of neighbouring pixels of the maps
+    info: dict
+
+    def spectrum(self, i):
+        return self.spectra[i]
+
+    def score_map(self, i):
+        return self.maps[i]
+
+    def shares(self):
+        """Share of the counts (NMF; ICA: of the sum of the map totals) of every component."""
+        t = self.maps.reshape(len(self.maps), -1).sum(axis=1, dtype=np.float64)
+        return t / max(float(np.abs(t).sum()), 1e-300)
+
+
+def _normalised(spectra, maps):
+    """Components scaled to sum |spectrum| = 1, maps mostly positive, ordered by the total of the maps."""
+    spectra, maps = np.array(spectra, np.float64), np.array(maps, np.float64)
+    for i in range(len(spectra)):
+        c = float(np.abs(spectra[i]).sum()) or 1.0
+        spectra[i] /= c
+        maps[i] *= c
+        if maps[i].sum() < 0:
+            spectra[i] *= -1
+            maps[i] *= -1
+    o = np.argsort(-maps.sum(axis=1))
+    return spectra[o], maps[o]
+
+
+ICA_MAX_ITER = 1000
+ICA_TOL = 1e-7
+
+
+def _sym_decorrelate(W):
+    """(W W^T)^(-1/2) W: rows made orthonormal."""
+    s, u = np.linalg.eigh(W @ W.T)
+    return (u * (1.0 / np.sqrt(np.maximum(s, 1e-30)))) @ u.T @ W
+
+
+def _fastica(Z, seed=0):
+    """Symmetric FastICA (Hyvärinen 1999; logcosh contrast) of the whitened rows Z (k, n): the unmixing
+    matrix W (k, k) and the number of iterations."""
+    k, n = Z.shape
+    W = _sym_decorrelate(np.random.default_rng(seed).normal(size=(k, k)))
+    it = 0
+    for it in range(1, ICA_MAX_ITER + 1):
+        G = np.tanh(Z.T @ W.T)                                     # (n, k)
+        W1 = _sym_decorrelate((G.T @ Z.T) / n - (1.0 - G * G).mean(axis=0)[:, None] * W)
+        lim = float(np.max(np.abs(np.abs(np.einsum('ij,ij->i', W1, W)) - 1.0)))
+        W = W1
+        if lim < ICA_TOL:
+            break
+    return W, it
+
+
+def ica_decompose(pca, comps, seed=0):
+    """Independent component analysis of the PCA model comps (FastICA on the component spectra, as the blind
+    source separation of HyperSpy): the spectra of the model (channels = samples, Poisson-weighted space) are
+    rotated to statistically most independent ones, the maps follow by the inverse rotation. X-ray spectra are
+    sparse (peaks), so the independent sources tend to be the spectra of phases, or of groups of elements that
+    vary together, instead of the PCA's deviations from the mean spectrum. The subspace is that of the model:
+    the reconstructed data are those of the PCA. Sign and scale of an independent component are arbitrary
+    (here: sum |spectrum| = 1, map mostly positive); its spectrum may still have negative parts."""
+    idx = list(comps)
+    F = pca.factors[idx]                                           # (k, m), orthonormal rows
+    T = pca.scores[idx].astype(np.float64)                         # (k, npix); Xw ~ T^T F
+    it = 0
+    if len(idx) > 1:
+        Fc = F - F.mean(axis=1, keepdims=True)
+        s, u = np.linalg.eigh(Fc @ Fc.T / Fc.shape[1])
+        K = (u / np.sqrt(np.maximum(s, 1e-30))) @ u.T              # whitening
+        W, it = _fastica(K @ Fc, seed)
+        U = W @ K                                                  # unmixing of the spectra
+        F, T = U @ F, np.linalg.solve(U.T, T)                      # T^T F = (U^-T T)^T (U F)
+    spectra, maps = _normalised(F * pca.col_w, T * pca.row_w)
+    maps = maps.reshape((len(idx),) + tuple(pca.shape)).astype(np.float32)
+    return Components('ica', spectra, maps, pca.sel, tuple(idx), np.array([_autocorr(m) for m in maps]),
+                      dict(iterations=it))
+
+
+NMF_SPARSE_NNZ = 1_000_000  # up to this many non-zero counts the spectra are learnt on the full-resolution counts
+NMF_DENSE = 8_000_000       # otherwise on the dense data summed over b x b pixel blocks, blocks x channels <= this
+NMF_MAX_ITER = 1000
+NMF_TOL = 3e-5              # relative change of the KL divergence over 10 updates that stops them
+NMF_MAP_ITER = 150          # most updates of the full-resolution maps (spectra fixed) after a decomposition of blocks
+NMF_MAP_GAIN = 0.01         # ... they stop when 5 updates gain less log-likelihood than this per pixel (statistically
+                            # nothing: the uncertainty of a pixel's k amounts is ~0.5 per amount)
+
+
+def _nnz_model(WT, H, rows, cols):
+    """(W H) at the entries (rows, cols) of a sparse matrix; WT = W.T (k, n) contiguous."""
+    out = WT[0].take(rows) * H[0].take(cols)
+    for j in range(1, len(H)):
+        out += WT[j].take(rows) * H[j].take(cols)
+    return np.maximum(out, 1e-12, out=out)
+
+
+def _kl_nmf(V, W, H, n_iter, progress=None):
+    """Multiplicative updates (Lee & Seung 2001) of W (n, k) and H (k, m) >= 0 minimising the generalised
+    KL divergence of the counts V from W H - the Poisson likelihood. V: csr (only the non-zero counts enter the
+    ratios V / (W H): an update costs ~ nnz x k, tens of counts per pixel over ~2000 channels) or a dense array
+    (summed pixel blocks; matrix products). Stops when the divergence changes by less than NMF_TOL (relative)
+    over 10 updates. Returns W, H (float32), number of updates, divergence."""
+    W, H = W.astype(np.float32), H.astype(np.float32)
+    dense = not sparse.issparse(V)
+    if dense:
+        V = np.asarray(V, np.float32)
+        nzi = np.flatnonzero(V)
+        v = V.ravel()[nzi].astype(np.float64)
+        R = np.empty_like(V)
+    else:
+        rows = np.repeat(np.arange(V.shape[0], dtype=np.int64), np.diff(V.indptr))
+        cols = V.indices
+        v = V.data.astype(np.float64)
+        v32 = V.data.astype(np.float32)
+        R = sparse.csr_matrix((v32.copy(), V.indices, V.indptr), shape=V.shape)
+    vlogv, vsum = float(np.sum(v * np.log(np.maximum(v, 1e-300)))), float(v.sum())
+
+    def ratio(keep):                # R = V / (W H); keep: return the model at the non-zero counts
+        if dense:
+            np.matmul(W, H, out=R)
+            np.maximum(R, 1e-12, out=R)
+            wh = R.ravel()[nzi].astype(np.float64) if keep else None
+            np.divide(V, R, out=R)
+            return wh
+        wh = _nnz_model(np.ascontiguousarray(W.T), H, rows, cols)
+        R.data = v32 / wh
+        return wh
+
+    prev, kl, it = None, np.nan, 0
+    for it in range(1, n_iter + 1):
+        ratio(False)
+        H *= (R.T @ W).T / np.maximum(W.sum(axis=0), 1e-12)[:, None]
+        wh = ratio(it % 10 == 0)
+        if it % 10 == 0:            # divergence of the current W, H
+            kl = (vlogv - float(np.sum(v * np.log(wh))) - vsum
+                  + float(W.sum(axis=0, dtype=np.float64) @ H.sum(axis=1, dtype=np.float64)))
+            if prev is not None and abs(prev - kl) <= NMF_TOL * abs(prev):
+                break
+            prev = kl
+            if progress:
+                progress(it)
+        W *= (R @ H.T) / np.maximum(H.sum(axis=1), 1e-12)[None, :]
+    return W, H, it, kl
+
+
+def _kl_maps(V, W, H, n_iter=NMF_MAP_ITER, chunk_nnz=1 << 20):
+    """Updates of the maps W (n, k) only, spectra H fixed, of the sparse counts V: every pixel is independent,
+    so the pixels go in chunks of ~chunk_nnz non-zero counts (columns of H gathered once per chunk). A chunk
+    stops when 5 updates gain less than NMF_MAP_GAIN log-likelihood per pixel. Returns W, the largest number
+    of updates of a chunk."""
+    W, H = W.astype(np.float32), H.astype(np.float32)
+    hs = np.maximum(H.sum(axis=1), 1e-12)
+    ip = V.indptr
+    r0, most = 0, 0
+    while r0 < V.shape[0]:
+        r1 = int(np.searchsorted(ip, ip[r0] + chunk_nnz, side='right')) - 1
+        r1 = min(max(r1, r0 + 1), V.shape[0])
+        sub = V[r0:r1]
+        rows = np.repeat(np.arange(r1 - r0, dtype=np.int64), np.diff(sub.indptr))
+        Hc = H[:, sub.indices]
+        v = sub.data.astype(np.float32)
+        R = sparse.csr_matrix((v.copy(), sub.indices, sub.indptr), shape=sub.shape)
+        WcT = np.ascontiguousarray(W[r0:r1].T)          # (k, rows of the chunk)
+        n_px = max(int(np.count_nonzero(np.diff(sub.indptr))), 1)
+        prev, it = None, 0
+        for it in range(1, n_iter + 1):
+            wh = WcT[0].take(rows) * Hc[0]
+            for j in range(1, len(H)):
+                wh += WcT[j].take(rows) * Hc[j]
+            np.maximum(wh, 1e-12, out=wh)
+            if it % 5 == 1:         # negative log-likelihood of the chunk (without the constant terms)
+                f = float(hs @ WcT.sum(axis=1, dtype=np.float64)) - float(np.sum(v * np.log(wh), dtype=np.float64))
+                if prev is not None and prev - f < NMF_MAP_GAIN * n_px:
+                    break
+                prev = f
+            R.data = v / wh
+            WcT *= (R @ H.T).T / hs[:, None]
+        W[r0:r1] = WcT.T
+        most = max(most, it)
+        r0 = r1
+    return W, most
+
+
+def _csr_cube(si, sel, chunk=4096):
+    """The spectrum image on the channels sel as a sparse (n_pix, len(sel)) matrix."""
+    cube = si.data.reshape(-1, si.data.shape[-1])
+    return sparse.vstack([sparse.csr_matrix(cube[s:s + chunk][:, sel].astype(np.float32))
+                          for s in range(0, len(cube), chunk)], format='csr')
+
+
+def _block_matrix(ny, nx, b):
+    """Sparse (n_blocks, n_pix) sum over b x b pixel blocks (incomplete blocks at the right / bottom edge)."""
+    nyb, nxb = -(-ny // b), -(-nx // b)
+    blk = ((np.arange(ny) // b)[:, None] * nxb + (np.arange(nx) // b)[None, :]).ravel()
+    return sparse.csr_matrix((np.ones(ny * nx, np.float32), (blk, np.arange(ny * nx))), shape=(nyb * nxb, ny * nx))
+
+
+def nmf_decompose(si, pca, comps, seed=1, progress=None):
+    """Non-negative matrix factorisation of the spectrum image si (the PCA input) on the PCA channels:
+    data ~ W H with non-negative maps W (counts per pixel of each component) and spectra H - additive parts,
+    usually the spectra of phases (a PCA or ICA component is a signed difference). k = the number of components
+    of the PCA model comps. Poisson likelihood (KL divergence), multiplicative updates (_kl_nmf). Up to
+    NMF_SPARSE_NNZ non-zero counts the factorisation is of the full-resolution counts; otherwise the spectra are
+    learnt on the data summed over b x b pixel blocks (dense, <= NMF_DENSE values) and the full-resolution maps
+    are then fitted with the spectra fixed (_kl_maps). Start: k-means of the smoothed ratios of the model's PCA
+    scores (as phase_labels) - the summed spectra of these k groups and maps of their pixels. NMF has no unique
+    solution; the start makes it deterministic. progress(text)."""
+    ny, nx, nch = si.data.shape
+    sel, k = pca.sel, len(comps)
+    full = _csr_cube(si, sel)
+    tot_full = np.asarray(full.sum(axis=1)).ravel()
+    b, V, A = 1, full, None
+    if full.nnz > NMF_SPARSE_NNZ:
+        b = 2
+        while -(-ny // b) * -(-nx // b) * len(sel) > NMF_DENSE and min(ny, nx) // (2 * b) >= 2:
+            b *= 2
+        A = _block_matrix(ny, nx, b)
+        V = (A @ full).toarray()
+    tot = np.asarray(V.sum(axis=1)).ravel().astype(np.float64)
+    if k == 1:
+        H = np.asarray(V.sum(axis=0), np.float64).reshape(1, -1)
+        W, it, kl = tot[:, None], 0, np.nan
+    else:
+        # start: k groups of pixels from the PCA scores of the model
+        sc = np.stack([ndimage.gaussian_filter(pca.score_map(i), 1.5).ravel() for i in comps], -1)
+        if A is not None:
+            sc = A @ sc
+        X = sc[:, 1:] / np.where(np.abs(sc[:, :1]) > 0, sc[:, :1], 1.0)
+        X = (X - X.mean(axis=0)) / np.maximum(X.std(axis=0), 1e-12)
+        ok = tot > np.percentile(tot, 10)
+        from scipy.cluster.vq import kmeans2
+        lab = np.full(len(tot), -1)
+        lab[ok] = kmeans2(X[ok], k, seed=seed, minit='++')[1]
+        mean = np.asarray(V.sum(axis=0), np.float64).ravel()
+        H = np.stack([np.asarray(V[lab == c].sum(axis=0), np.float64).ravel() if np.any(lab == c) else mean
+                      for c in range(k)])
+        H = ndimage.gaussian_filter1d(H, 1.0, axis=1) + 1e-3 * H.mean()
+        H /= H.sum(axis=1, keepdims=True)
+        W = np.repeat((0.1 / k) * tot[:, None], k, axis=1)
+        for c in range(k):
+            W[lab == c, c] += 0.9 * tot[lab == c]
+        W[lab < 0] = (tot[lab < 0] / k)[:, None]
+        W = np.maximum(W, 1e-6)
+
+        def prog(i):
+            if progress:
+                progress(f'NMF: {k} компонент, {i} итераций' + (f' (блоки {b}×{b})' if b > 1 else ''))
+        W, H, it, kl = _kl_nmf(V, W, H, NMF_MAX_ITER, progress=prog)
+    H, W = np.asarray(H, np.float64), np.asarray(W, np.float64)
+    s = np.maximum(H.sum(axis=1), 1e-300)
+    H, W = H / s[:, None], W * s[None, :]
+    if b > 1:       # full-resolution maps, spectra fixed; start: the block's W shared by the counts of its pixels
+        W = (A.T @ W) * (tot_full / np.maximum(A.T @ tot, 1e-12))[:, None]
+    map_it = 0
+    if b > 1 and k > 1:
+        if progress:
+            progress('NMF: карты в полном разрешении…')
+        W, map_it = _kl_maps(full, np.maximum(W, 1e-6), H)
+    spectra, maps = _normalised(H, np.asarray(W, np.float64).T)
+    maps = maps.reshape(k, ny, nx).astype(np.float32)
+    return Components('nmf', spectra, maps, sel, tuple(comps), np.array([_autocorr(x) for x in maps]),
+                      dict(iterations=it, binning=b, map_iterations=map_it, divergence=kl, nnz=int(full.nnz)))
+
+
+def components_reconstruct(si, comp, chunk=4096):
+    """Spectrum image rebuilt from the components comp (Components): float32, channels outside comp.sel
+    unchanged."""
+    ny, nx, nch = si.data.shape
+    out = si.data.astype(np.float32)
+    flat = out.reshape(ny * nx, nch)
+    M = comp.maps.reshape(len(comp.maps), -1).astype(np.float32)
+    S = comp.spectra.astype(np.float32)
+    for s in range(0, ny * nx, chunk):
+        flat[s:s + chunk, comp.sel] = M[:, s:s + chunk].T @ S
     return out
 
 
